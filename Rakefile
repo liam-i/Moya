@@ -24,7 +24,7 @@ end
 
 def targets
   return [
-    # :macos, # Note: we're experiencing macOS build problems on circle, commenting out.
+    :macos,
     :tvos,
     :ios
   ]
@@ -56,15 +56,15 @@ end
 
 def device_names
   return {
-    ios: "iPhone 6s",
-    tvos: "Apple TV 1080p"
+    ios: "iPhone 8",
+    tvos: "Apple TV 4K (at 1080p)"
   }
 end
 
 def device_os
   return {
-    ios: "10.2",
-    tvos: "10.0"
+    ios: "13.0",
+    tvos: "13.0"
   }
 end
 
@@ -73,26 +73,26 @@ def open_simulator_and_sleep(platform)
   sh "xcrun instruments -w '#{device_names[platform]} (#{device_os[platform]})' || sleep 15"
 end
 
-def xcodebuild(tasks, platform, xcprety_args: '')
+def xcodebuild(tasks, platform, xcprety_args: '', xcode_summary: false)
   sdk = sdks[platform]
   scheme = schemes[platform]
   destination = devices[platform]
 
   open_simulator_and_sleep(platform)
-  safe_sh "set -o pipefail && xcodebuild -project '#{moya_project}' -scheme '#{scheme}' -configuration '#{configuration}' -sdk #{sdk} -destination '#{destination}' #{tasks} | bundle exec xcpretty -c #{xcprety_args}"
+  xcpretty_json_output_name = xcode_summary == true ? " XCPRETTY_JSON_FILE_OUTPUT=\"xcodebuild-#{platform}.json\"" : ""
+  xcpretty_formatter = xcode_summary == true ? " -f `bundle exec xcpretty-json-formatter`" : ""
+  safe_sh "set -o pipefail && xcodebuild -project '#{moya_project}' -scheme '#{scheme}' -configuration '#{configuration}' -sdk #{sdk} -destination '#{destination}' #{tasks} |#{xcpretty_json_output_name} bundle exec xcpretty -c #{xcprety_args}#{xcpretty_formatter}"
 end
 
-def xcodebuild_demo(tasks, xcprety_args: '')
+def xcodebuild_example(tasks, xcprety_args: '')
   platform = :ios
   sdk = sdks[platform]
   destination = devices[platform]
-  demo_workspace = 'Demo.xcworkspace'
-  demo_scheme = 'Demo'
+  demo_project = 'Moya.xcodeproj'
+  demo_scheme = 'Basic'
 
-  Dir.chdir('Demo') do
-    open_simulator_and_sleep(platform)
-    safe_sh "set -o pipefail && xcodebuild -workspace '#{demo_workspace}' -scheme '#{demo_scheme}' -configuration '#{configuration}' -sdk #{sdk} -destination '#{destination}' #{tasks} | bundle exec xcpretty -c #{xcprety_args}"
-  end
+  open_simulator_and_sleep(platform)
+  safe_sh "set -o pipefail && xcodebuild -project '#{demo_project}' -scheme '#{demo_scheme}' -configuration '#{configuration}' -sdk #{sdk} -destination '#{destination}' #{tasks} | bundle exec xcpretty -c #{xcprety_args}"
 end
 
 desc 'Build Moya.'
@@ -101,8 +101,8 @@ task :build do
 end
 
 desc 'Build the Demo app.'
-task :build_demo do
-  xcodebuild_demo 'build'
+task :build_example do
+  xcodebuild_example 'build'
 end
 
 desc 'Clean build directory.'
@@ -114,9 +114,7 @@ desc 'Build, then run all tests.'
 task :test do
   targets.map do |platform|
     puts "Testing on #{platform}."
-    xcodebuild 'build test', platform, xcprety_args: '--test'
-    next unless platform == :mac
-    sh "killall Simulator"
+    xcodebuild 'build test', platform, xcprety_args: '--test', xcode_summary: true
   end
 end
 
@@ -124,19 +122,17 @@ desc 'Individual test tasks.'
 namespace :test do
   desc 'Test on iOS.'
   task :ios do
-    xcodebuild 'build test', :ios, xcprety_args: '--test'
-    sh "killall Simulator"
+    xcodebuild 'build test', :ios, xcprety_args: '--test', xcode_summary: true
   end
 
   desc 'Test on macOS.'
   task :macos do
-    xcodebuild 'build test', :macos, xcprety_args: '--test'
+    xcodebuild 'build test', :macos, xcprety_args: '--test', xcode_summary: true
   end
 
   desc 'Test on tvOS.'
   task :tvos do
-    xcodebuild 'build test', :tvos, xcprety_args: '--test'
-    sh "killall Simulator"
+    xcodebuild 'build test', :tvos, xcprety_args: '--test', xcode_summary: true
   end
 
   desc 'Run a local copy of Carthage on this current directory.'
@@ -155,40 +151,12 @@ namespace :test do
 end
 
 desc 'Release a version, specified as an argument.'
-task :release, :version do |task, args|
-  version = args[:version]
-  # Needs a X.Y.Z-text format.
-  abort "You must specify a version in semver format." if version.nil? || version.scan(/\d+\.\d+\.\d+(-\w+\.\d+)?/).length == 0
-
-  puts "Updating podspec."
-  filename = "Moya.podspec"
-  contents = File.read(filename)
-  contents.gsub!(/s\.version\s*=\s"\d+\.\d+\.\d+(-\w+\.\d)?"/, "s.version      = \"#{version}\"")
-  File.open(filename, 'w') { |file| file.puts contents }
-
-  puts "Updating Demo project."
-  Dir.chdir('Demo') do
-    ENV['COCOAPODS_DISABLE_DETERMINISTIC_UUIDS'] = 'true'
-    sh "bundle exec pod update Moya --verbose"
-  end
-
-  puts "Updating changelog."
-  changelog_filename = "CHANGELOG.md"
-  changelog = File.read(changelog_filename)
-  changelog.gsub!(/# Next/, "# Next\n\n# #{version}")
-  File.open(changelog_filename, 'w') { |file| file.puts changelog }
-
-  puts "Comitting, tagging, and pushing."
-  message = "Releasing version #{version}."
-  sh "git commit -am '#{message}'"
-  sh "git tag #{version} -m '#{message}'"
-  sh "git push --follow-tags"
-
-  puts "Pushing to CocoaPods trunk."
-  sh "bundle exec pod trunk push Moya.podspec --allow-warnings"
-
+task :create_release, :version do |task, args|
   puts "Pushing as a GitHub Release."
   require 'octokit'
+  version = args[:version]
+  changelog_filename = "CHANGELOG.md"	
+  changelog = File.read(changelog_filename)
   Octokit::Client.new(netrc: true).
     create_release('Moya/Moya',
                    version,
